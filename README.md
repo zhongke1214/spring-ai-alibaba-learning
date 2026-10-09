@@ -229,6 +229,9 @@ Agent Framework 预置了四类编排模式：
 
 **<font style="color:rgb(51, 51, 51);">推荐资料：</font>**
 
-+ [<font style="color:rgb(65, 131, 196);">https://java2ai.com/docs/overview</font>](https://java2ai.com/docs/overview)
-+ [<font style="color:rgb(65, 131, 196);">https://java2ai.com/docs/quick-start</font>](https://java2ai.com/docs/quick-start)
++ [<font style="color:rgb(65, 131, 196);">官方文档：https://java2ai.com/docs/overview</font>](https://java2ai.com/docs/overview)
++ [<font style="color:rgb(65, 131, 196);">我的CSDN：https://blog.csdn.net/qq_37878585</font>](https://blog.csdn.net/qq_37878585)
+
++ ## 七、文档
++ + [<font style="color:rgb(65, 131, 196);">stage01-1.Spring AI 底座.md</font>](https://github.com/zhongke1214/spring-ai-alibaba-learning/blob/main/doc/1.Spring%20AI%20%E5%BA%95%E5%BA%A7.md)
 
