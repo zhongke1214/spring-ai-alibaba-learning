@@ -9,10 +9,10 @@ spring:
     dashscope:
 #        生产环境强烈推荐使用环境变量（或等效的外部化配置），而不是把密钥硬编码在
       api-key: ${AI_DASHSCOPE_API_KEY}
-#      chat:
-#        options:
-#          model: qwen3.7-flash
-#          multi-model: true
+      chat:
+        options:
+          model: qwen3.7-flash
+          multi-model: true
 
 
 server:
