@@ -233,5 +233,9 @@ Agent Framework 预置了四类编排模式：
 + [<font style="color:rgb(65, 131, 196);">我的CSDN：https://blog.csdn.net/qq_37878585</font>](https://blog.csdn.net/qq_37878585)
 
 + ## 七、文档
-+ + [<font style="color:rgb(65, 131, 196);">stage01-1.Spring AI 底座.md</font>](https://github.com/zhongke1214/spring-ai-alibaba-learning/blob/main/doc/1.Spring%20AI%20%E5%BA%95%E5%BA%A7.md)
+   [<font style="color:rgb(65, 131, 196);">stage01-Spring AI 底座.md</font>](https://github.com/zhongke1214/spring-ai-alibaba-learning/blob/main/doc/1.Spring%20AI%20%E5%BA%95%E5%BA%A7.md)
+  
+   [<font style="color:rgb(65, 131, 196);">stage02-ReactAgent-手把手带你搭建自己的agent.md</font>](https://github.com/zhongke1214/spring-ai-alibaba-learning/blob/main/doc/02-ReactAgent-%E6%89%8B%E6%8A%8A%E6%89%8B%E5%B8%A6%E4%BD%A0%E6%90%AD%E5%BB%BA%E8%87%AA%E5%B7%B1%E7%9A%84agent.md)
+  
+  后续正在更新...
 
