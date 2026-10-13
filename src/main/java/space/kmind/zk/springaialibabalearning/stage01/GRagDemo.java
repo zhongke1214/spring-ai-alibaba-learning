@@ -1,4 +1,4 @@
-package space.kmind.zk.springaialibabalearning.stage01.controller;
+package space.kmind.zk.springaialibabalearning.stage01;
 
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.annotation.PostConstruct;
@@ -73,20 +73,20 @@ public class GRagDemo {
      * 使用 @PostConstruct 保证在构造完成后、请求到达前执行。
      * 实际项目中这些文档来自 PDF、数据库或爬虫，这里手动写入几条用于演示。
      */
-    @PostConstruct
-    public void initKnowledgeBase() {
-        List<Document> documents = List.of(
-                new Document("公司年假为 10 天，入职满 3 年后增至 15 天，满 5 年增至 20 天。"),
-                new Document("请假需提前 3 个工作日通过 OA 系统提交申请，由直属主管审批。"),
-                new Document("公司报销流程：在 OA 系统提交报销申请，附上发票原件照片，直属主管审批后由财务部复核，3 个工作日内打款。"),
-                new Document("差旅报销标准：一线城市住宿每晚不超过 500 元，二线城市不超过 350 元。"),
-                new Document("年终奖于每年 1 月 15 日发放，计算基数为上一年度 12 个月的平均月薪。"),
-                new Document("五险一金按照国家规定缴纳，公积金缴存比例为 12%。")
-        );
-
-        vectorStore.add(documents);
-        log.info("【RAG 初始化】已向 SimpleVectorStore 写入 {} 条知识文档", documents.size());
-    }
+//    @PostConstruct
+//    public void initKnowledgeBase() {
+//        List<Document> documents = List.of(
+//                new Document("公司年假为 10 天，入职满 3 年后增至 15 天，满 5 年增至 20 天。"),
+//                new Document("请假需提前 3 个工作日通过 OA 系统提交申请，由直属主管审批。"),
+//                new Document("公司报销流程：在 OA 系统提交报销申请，附上发票原件照片，直属主管审批后由财务部复核，3 个工作日内打款。"),
+//                new Document("差旅报销标准：一线城市住宿每晚不超过 500 元，二线城市不超过 350 元。"),
+//                new Document("年终奖于每年 1 月 15 日发放，计算基数为上一年度 12 个月的平均月薪。"),
+//                new Document("五险一金按照国家规定缴纳，公积金缴存比例为 12%。")
+//        );
+//
+//        vectorStore.add(documents);
+//        log.info("【RAG 初始化】已向 SimpleVectorStore 写入 {} 条知识文档", documents.size());
+//    }
 
     /**
      * 正常 RAG 问答。

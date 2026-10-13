@@ -1,4 +1,4 @@
-package space.kmind.zk.springaialibabalearning.stage01.controller;
+package space.kmind.zk.springaialibabalearning.stage01;
 
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.slf4j.Logger;
