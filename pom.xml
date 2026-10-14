@@ -74,6 +74,13 @@
             <groupId>com.alibaba.cloud.ai</groupId>
             <artifactId>spring-ai-alibaba-agent-framework</artifactId>
         </dependency>
+
+        <!-- 生产级 Checkpoint 演示：Redis（任选 Redis / DB） -->
+        <dependency>
+            <groupId>org.redisson</groupId>
+            <artifactId>redisson-spring-boot-starter</artifactId>
+            <version>3.45.1</version>
+        </dependency>
     </dependencies>
 
     <build>
