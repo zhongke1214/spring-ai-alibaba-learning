@@ -233,11 +233,14 @@ Agent Framework 预置了四类编排模式：
 + [<font style="color:rgb(65, 131, 196);">我的CSDN：https://blog.csdn.net/qq_37878585</font>](https://blog.csdn.net/qq_37878585)
 
 + ## 七、文档
-   [<font style="color:rgb(65, 131, 196);">stage01-Spring AI 底座.md</font>](https://github.com/zhongke1214/spring-ai-alibaba-learning/blob/main/doc/01-Spring%20AI%20%E5%BA%95%E5%BA%A7.md)
+   [<font style="color:rgb(65, 131, 196);">stage01-Spring AI 底座</font>](https://github.com/zhongke1214/spring-ai-alibaba-learning/blob/main/doc/01-Spring%20AI%20%E5%BA%95%E5%BA%A7.md)
   
-   [<font style="color:rgb(65, 131, 196);">stage02-ReactAgent-手把手带你搭建自己的agent.md</font>](https://github.com/zhongke1214/spring-ai-alibaba-learning/blob/main/doc/02-ReactAgent-%E6%89%8B%E6%8A%8A%E6%89%8B%E5%B8%A6%E4%BD%A0%E6%90%AD%E5%BB%BA%E8%87%AA%E5%B7%B1%E7%9A%84agent.md)
+   [<font style="color:rgb(65, 131, 196);">stage02-ReactAgent-手把手带你搭建自己的agent</font>](https://github.com/zhongke1214/spring-ai-alibaba-learning/blob/main/doc/02-ReactAgent-%E6%89%8B%E6%8A%8A%E6%89%8B%E5%B8%A6%E4%BD%A0%E6%90%AD%E5%BB%BA%E8%87%AA%E5%B7%B1%E7%9A%84agent.md)
 
   [<font style="color:rgb(65, 131, 196);">stage03-别让 Agent 重启就失忆：Checkpoint 、压缩上下文、业务字段分离设计实战</font>](https://github.com/zhongke1214/spring-ai-alibaba-learning/blob/main/doc/03-%E5%88%AB%E8%AE%A9%20Agent%20%E9%87%8D%E5%90%AF%E5%B0%B1%E5%A4%B1%E5%BF%86%EF%BC%9ACheckpoint%20%E3%80%81%E5%8E%8B%E7%BC%A9%E4%B8%8A%E4%B8%8B%E6%96%87%E3%80%81%E4%B8%9A%E5%8A%A1%E5%AD%97%E6%AE%B5%E5%88%86%E7%A6%BB%E8%AE%BE%E8%AE%A1%E5%AE%9E%E6%88%98.md)
+
+  [<font style="color:rgb(65, 131, 196);">stage04-Spring AI Alibaba ReactAgent 生产级实践：工具调用、结构化输出、HITL 与上下文管理</font>](https://github.com/zhongke1214/spring-ai-alibaba-learning/blob/main/doc/04-Spring%20AI%20Alibaba%20ReactAgent%20%E7%94%9F%E4%BA%A7%E7%BA%A7%E5%AE%9E%E8%B7%B5%EF%BC%9A%E5%B7%A5%E5%85%B7%E8%B0%83%E7%94%A8%E3%80%81%E7%BB%93%E6%9E%84%E5%8C%96%E8%BE%93%E5%87%BA%E3%80%81HITL%20%E4%B8%8E%E4%B8%8A%E4%B8%8B%E6%96%87%E7%AE%A1%E7%90%86.md)
+  
   
   后续正在更新...
 
