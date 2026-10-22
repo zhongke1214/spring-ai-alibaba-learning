@@ -31,7 +31,7 @@ public class ATravelMultiAgentDemo {
 
     public ATravelMultiAgentDemo(ChatModel chatModel) throws Exception {
 
-        // ========== §3 + §4.1：Sequential + outputKey + 占位符 ==========
+        // ========== 模式一：Sequential + outputKey 接力（草稿 → 润色） ==========
         ReactAgent drafter = ReactAgent.builder()
                 .name("itinerary_drafter")
                 .model(chatModel)
@@ -46,7 +46,7 @@ public class ATravelMultiAgentDemo {
                 .description("行程润色员。只润色已有草稿。")
                 .instruction("请润色以下行程草稿，使其更清晰，只返回终稿：\n{itinerary_draft}")
                 .outputKey("itinerary_final")
-                .includeContents(false)
+                .includeContents(false)   // 润色只看草稿，父上下文是噪音，关掉
                 .build();
 
         this.sequentialAgent = SequentialAgent.builder()
@@ -55,7 +55,7 @@ public class ATravelMultiAgentDemo {
                 .subAgents(List.of(drafter, polisher))
                 .build();
 
-        // ========== §4.2：Parallel 扇出后合并 ==========
+        // ========== 模式二：Parallel 扇出后合并（机票/酒店/天气互不依赖） ==========
         ReactAgent flightP = expert(chatModel, "flight_parallel",
                 "机票调研。只回答航班与票价要点。",
                 "你是机票调研员。针对用户差旅需求给出航班要点。需求：{input}",
@@ -77,7 +77,7 @@ public class ATravelMultiAgentDemo {
                 .mergeStrategy(new ParallelAgent.DefaultMergeStrategy())
                 .build();
 
-        // ========== §4.3：LlmRouting 单次分诊（description 定边界）==========
+        // ========== 模式三：LlmRouting 单次分诊（description 划边界是关键） ==========
         ReactAgent flightR = expert(chatModel, "flight_agent",
                 "机票专家。只处理航班、舱位、票价。不处理酒店、天气、行程。",
                 "你是机票顾问。给出航班方案要点。用户问题：{input}",
@@ -90,7 +90,7 @@ public class ATravelMultiAgentDemo {
                 "行程专家。只处理景点与日程安排。不处理订票订房。",
                 "你是行程规划师。给出按天行程。用户问题：{input}",
                 "itinerary_plan");
-        // §3：天气专家关掉父上下文，避免被「顺带提一句机票」带偏
+        // 天气专家特意关掉父上下文：防止被用户"顺带提一句机票"带偏
         ReactAgent weatherR = ReactAgent.builder()
                 .name("weather_agent")
                 .model(chatModel)
@@ -112,7 +112,7 @@ public class ATravelMultiAgentDemo {
                 .subAgents(List.of(flightR, hotelR, itineraryR, weatherR))
                 .build();
 
-        // ========== §4.4：Loop 有限次打磨 ==========
+        // ========== 模式四：Loop 有限次打磨 ==========
         ReactAgent refiner = ReactAgent.builder()
                 .name("itinerary_refiner")
                 .model(chatModel)
@@ -129,10 +129,10 @@ public class ATravelMultiAgentDemo {
                 .name("itinerary_loop")
                 .description("最多打磨 3 次")
                 .subAgent(refiner)
-                .loopStrategy(LoopMode.count(3))
+                .loopStrategy(LoopMode.count(3))   // 必须设上限，防 Token 焚烧
                 .build();
 
-        // ========== §5.1：Supervisor = ReactAgent + AgentTool ==========
+        // ========== 模式五：Supervisor = ReactAgent + AgentTool ==========
         ReactAgent flightTool = toolExpert(chatModel, "flight_agent",
                 "机票专家。根据自然语言给出航班方案要点。",
                 "你是机票顾问。根据输入给出航班方案要点，只返回要点。");
@@ -158,7 +158,7 @@ public class ATravelMultiAgentDemo {
                 .saver(new MemorySaver())
                 .build();
 
-        // ========== §5.5：混合嵌套 Sequential( Parallel → Summarizer ) ==========
+        // ========== 模式六：混合嵌套 Sequential( Parallel → Summarizer ) ==========
         ReactAgent hybridSummarizer = ReactAgent.builder()
                 .name("travel_summarizer")
                 .model(chatModel)
@@ -171,7 +171,7 @@ public class ATravelMultiAgentDemo {
                 .includeContents(false)
                 .build();
 
-        // 复用上面的 parallelAgent 作为子步骤
+        // 注意这里直接复用了上面的 parallelAgent 作为外层 Sequential 的一个子步骤——嵌套就是这么自然
         this.hybridAgent = SequentialAgent.builder()
                 .name("travel_hybrid")
                 .description("先并行调研，再串行汇总")
@@ -179,6 +179,7 @@ public class ATravelMultiAgentDemo {
                 .build();
     }
 
+    // 流水线用：有 outputKey、instruction 里带 {input} 占位符
     private static ReactAgent expert(ChatModel model, String name, String desc,
                                      String instruction, String outputKey) {
         return ReactAgent.builder()
@@ -190,6 +191,7 @@ public class ATravelMultiAgentDemo {
                 .build();
     }
 
+    // Supervisor 用：没有 outputKey，靠 systemPrompt + inputType(String) 接收子任务、工具返回值回传
     private static ReactAgent toolExpert(ChatModel model, String name,
                                          String desc, String systemPrompt) {
         return ReactAgent.builder()
@@ -201,7 +203,7 @@ public class ATravelMultiAgentDemo {
                 .build();
     }
 
-    @Operation(summary = "§4.1 Sequential：草稿→润色（outputKey 接力）")
+    @Operation(summary = "Sequential：草稿→润色（outputKey 接力）")
     @PostMapping("/api/s51/sequential")
     public Map<String, Object> sequential(@RequestBody Map<String, String> body) throws Exception {
         String q = body.getOrDefault("message", "杭州两日游，偏西湖与美食");
@@ -209,7 +211,7 @@ public class ATravelMultiAgentDemo {
                 List.of("itinerary_draft", "itinerary_final"));
     }
 
-    @Operation(summary = "§4.2 Parallel：机票+酒店+天气并行合并")
+    @Operation(summary = "Parallel：机票+酒店+天气并行合并")
     @PostMapping("/api/s52/parallel")
     public Map<String, Object> parallel(@RequestBody Map<String, String> body) throws Exception {
         String q = body.getOrDefault("message", "下周五去杭州两天，预算中等");
@@ -217,7 +219,7 @@ public class ATravelMultiAgentDemo {
                 List.of("research_bundle", "flight_plan", "hotel_plan", "weather_plan"));
     }
 
-    @Operation(summary = "§4.3 Routing：单意图分诊")
+    @Operation(summary = "Routing：单意图分诊")
     @PostMapping("/api/s53/route")
     public Map<String, Object> route(@RequestBody Map<String, String> body) throws Exception {
         String q = body.getOrDefault("message", "下周五上海飞杭州机票怎么选？");
@@ -225,21 +227,21 @@ public class ATravelMultiAgentDemo {
                 List.of("flight_plan", "hotel_plan", "itinerary_plan", "weather_plan"));
     }
 
-    @Operation(summary = "§4.4 Loop：行程最多打磨 3 次")
+    @Operation(summary = "Loop：行程最多打磨 3 次")
     @PostMapping("/api/s54/loop")
     public Map<String, Object> loop(@RequestBody Map<String, String> body) throws Exception {
         String q = body.getOrDefault("message", "杭州两日游行程，请尽量具体到半天");
         return toView(loopAgent.invoke(q), List.of("refined_itinerary"));
     }
 
-    @Operation(summary = "§5.1 Supervisor：专家当 Tool 多轮调度")
+    @Operation(summary = "Supervisor：专家当 Tool 多轮调度")
     @PostMapping("/api/s55/supervise")
     public Map<String, Object> supervise(@RequestBody Map<String, String> body) throws Exception {
         String q = body.getOrDefault("message", "杭州两日游，帮我安排机票思路、住宿和行程");
         return toView(supervisorAgent.invoke(q), List.of());
     }
 
-    @Operation(summary = "§5.5 混合：Parallel 调研后再 Sequential 汇总")
+    @Operation(summary = "混合：Parallel 调研后再 Sequential 汇总")
     @PostMapping("/api/s56/hybrid")
     public Map<String, Object> hybrid(@RequestBody Map<String, String> body) throws Exception {
         String q = body.getOrDefault("message", "杭州两日：并行调研机票酒店天气并出简报");
@@ -258,7 +260,7 @@ public class ATravelMultiAgentDemo {
         for (String key : keys) {
             state.value(key).ifPresent(v -> view.put(key, unwrap(v)));
         }
-        // Supervisor 等：最终回复在 messages 末条
+        // Supervisor 没有配 outputKey，最终回复藏在 messages 列表的最后一条里
         state.value("messages").ifPresent(msgs -> {
             if (msgs instanceof List<?> list && !list.isEmpty()) {
                 Object last = list.get(list.size() - 1);

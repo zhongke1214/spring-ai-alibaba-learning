@@ -1,43 +1,28 @@
-# **Spring AI Alibaba ReactAgent 生产级实践：工具调用、结构化输出、HITL 与上下文管理**
+# Spring AI Alibaba ReactAgent 生产级实践：工具调用、结构化输出、HITL 与上下文管理
 
-## 1. 前期准备
+> 版本基准：**Spring AI Alibaba 1.1.2.x + Spring AI 1.1.2 + JDK 17+**（本文所有 API 以此版本为准）
+>
+> - 官方文档：https://java2ai.com
+> - Hooks 教程：https://java2ai.com/docs/frameworks/agent-framework/tutorials/hooks
+> - 记忆教程：https://java2ai.com/docs/frameworks/agent-framework/tutorials/memory
+> - 官方主仓库：https://github.com/alibaba/spring-ai-alibaba
+> - 官方示例：https://github.com/spring-ai-alibaba/examples（含 `HumanInTheLoopExample`、Skills 示例）
+>
+> 版本跟仓库约定对齐：JDK 17+ / Spring Boot 3.5.7 / Spring AI 1.1.2 / Spring AI Alibaba 1.1.2.2
 
-版本基准：Spring AI Alibaba 1.1.2.x + Spring AI 1.1.2 + JDK 17+
+上一篇把 Checkpoint 换成持久化之后，Agent 已经**重启还能续聊**。这一篇再往上加一层治理：
 
-官方文档：https://java2ai.com
-
-Hooks 教程：https://java2ai.com/docs/frameworks/agent-framework/tutorials/hooks
-
-记忆教程：https://java2ai.com/docs/frameworks/agent-framework/tutorials/memory
-
-官方主仓库：https://github.com/alibaba/spring-ai-alibaba
-
-官方示例：https://github.com/spring-ai-alibaba/examples（含 `HumanInTheLoopExample`、Skills 示例）
-
-版本跟仓库约定对齐：
-
-```text
-JDK                 17+
-Spring Boot         3.5.7
-Spring AI           1.1.2
-Spring AI Alibaba   1.1.2.2
-```
-
-上一篇把 Checkpoint 换成持久化后，Agent **重启还能续聊**。本篇往上再加一层治理手段：
-
-**危险工具配合工点确认、超长对话自动压缩、工具抖动自动重试、能力按需展开。**
+**危险工具配合人工确认、超长对话自动压缩、工具抖动自动重试、能力按需展开。**
 
 ---
 
-## 2. 为什么需要 Hooks / Interceptors？
+## 一、ReactAgent 主循环管不了的那些事
 
-ReactAgent 的主循环本身很短：**模型推理 → 调工具 → 观察结果 → 再推理**，直到模型决定停止。但把这个简单循环直接放进生产环境，会撞上一堆“循环本身管不了”的问题。Hooks 和 Interceptors 就是插在循环关键点上的**安全带 + 仪表盘**。主循环只管“推理和调工具”，不管“该不该调、调几次、调完怎么处理、成本多少”。下面六个痛点，都是主循环天然无法覆盖的。
+先把 ReactAgent 的主循环摊开看，它其实短得惊人：**模型推理 → 调工具 → 观察结果 → 再推理**，直到模型自己决定停下。
 
-**痛点一：高风险操作无人把关**
+就这么一个小循环，直接丢进生产环境，会撞上一堆它**天生管不了**的问题。原因很简单：主循环只负责"推理和调工具"，至于"该不该调、调几次、调完怎么收尾、花了多少钱"，它一概不管。下面逐个看这些缺口——每个缺口对应一类事故，也对应一个治理组件。
 
-**没有治理时**：模型在对话里说“好的，我帮你退款”，直接调了 `refund(orderId, amount)` 工具，钱就出去了。模型没有“审批”概念，它只根据提示词和上下文决定下一步动作。
-
-**有 Hook 时**：在工具执行前插入 `HumanInTheLoopHook`，拦截高风险工具调用，暂停执行，等人确认、改参或拒绝。
+**缺口一：高风险操作没人把关。** 模型在对话里说"好的，我帮你退款"，顺手就调了 `refund(orderId, 199)`，钱当场出去了。它没有"审批"这个概念，只根据提示词和上下文决定下一步动作——你没法靠写一句 prompt 让它学会谨慎。治理手段是在工具执行前插入 `HumanInTheLoopHook`，把高风险调用拦下来，暂停执行，等人确认、改参或拒绝：
 
 ```
 模型决定调 refund(orderId, 199)
@@ -47,83 +32,29 @@ HumanInTheLoopHook 拦截
 等待人工审批（可能是几分钟、几小时）
         ↓
 批准 → 继续执行
-拒绝 → 返回“已拒绝”作为观察结果
+拒绝 → 返回"已拒绝"作为观察结果
 改参 → 用修改后的参数执行
 ```
 
-**关键能力**：中断、恢复、状态持久化。中断期间 Agent 状态存在 Checkpoint 里，人审批后从断点继续。这是主循环做不到的。
+这里的关键能力是**中断、恢复、状态持久化**：中断期间 Agent 的完整状态躺在 Checkpoint 里，人审批完再从断点接着跑。这一段等待可能是几小时甚至跨天——主循环自己绝对做不到，它必须依赖上一篇讲的 Saver。
 
+**缺口二：对话越聊越长。** 50 轮之后 messages 里堆了几百条消息，Token 消耗爆炸，模型注意力被稀释，回答质量下滑，再往下就该触发上下文长度上限报错了。治理手段是模型调用前的上下文管理：一是**硬窗口修剪**，按轮次/工具组裁剪，保留最近 N 轮，保证不超限也不破坏消息结构；二是**摘要提质**，把早期对话压缩成一段摘要作为 SystemMessage 放在历史开头，保住关键事实。这活儿归 Hook 而不是主循环，因为主循环只管"把 messages 发给模型"，不管"messages 是不是太长了"——裁剪逻辑放在 Hook 里才能可插拔、可配置。
 
+**缺口三：工具偶发抖动。** 工具超时或抛异常，主循环要么把异常直接抛上去让整个会话崩掉，要么让模型看到失败后反复重试同一个工具，陷入死循环。治理手段有三层：`ToolRetryHook` / `ToolRetryInterceptor` 对瞬时故障自动重试有限次数（带退避）；工具内部捕获异常、返回结构化错误 JSON，让模型看到"失败了"这个观察结果而不是崩掉；`ModelCallLimitHook` 限制模型调用次数，防止空转烧钱。这里有个很重要的设计观念：**工具失败不是致命错误，而是一次可观察的结果**——把异常翻译成模型能看懂的消息，让它自己决定下一步（重试、换工具、还是如实告知用户）。
 
-**痛点二：对话越聊越长**
+**缺口四：工具上百个，Prompt 塞爆。** 所有工具的 description 全塞进 System Prompt，几万 token 起步；模型在 100 个工具里挑，选错概率大增，而且每加一个工具都要改 Prompt。治理手段是**动态筛选**和 **Skills 渐进披露**：前者根据当前对话只注入相关工具（问天气就只给 `get_weather`）；后者把工具按技能分组，先给模型看"有哪些技能类别"，它选了类别再展开具体工具。这逻辑必须在模型调用前动态执行、依赖当前对话状态，静态的主循环做不了。
 
-**没有治理时**：50 轮对话后，messages 里堆了几百条消息。Token 消耗爆炸，模型注意力被稀释，回答质量下降，甚至触发上下文长度上限报错。
+**缺口五：成本失控。** ReAct 循环空转是真实存在的：模型反复推理、调工具、观察、再推理，每一步都是一次 API 调用，一个复杂任务跑 20 轮，成本就是预期的十倍。治理手段是双层限流——`ModelCallLimitHook` 管模型调用次数，`ToolCallLimitHook` 管工具调用次数。取舍在于 `runLimit` 设多大：设太大等于没保护，设太小正常任务被误杀，**经验值是"最复杂正常任务所需步数 × 1.5"**。
 
-**有 Hook 时**：在模型调用前插入上下文管理 Hook，做两件事：
+**缺口六：出了事看不见。** Agent 跑完只返回一句最终回复，它调了哪些工具、中间怎么推理的、哪一步最慢、哪一步失败了，一概不知，出问题只能靠猜。治理手段就是在关键节点插日志埋点：模型调用前后记录输入输出 token、耗时、模型名；工具调用前后记录工具名、参数、返回、耗时、成败；执行结束时汇总整条轨迹输出结构化日志。
 
-- **硬窗口修剪**：按轮次/工具组裁剪，保留最近 N 轮，确保不超限、不破坏消息结构。
-- **摘要提质**：把早期对话压缩成一段摘要，作为 SystemMessage 放在历史开头，保留关键事实。
+这六个缺口，就是下面所有 Hook 和 Interceptor 存在的理由。带着"我在防什么事故"去看这些组件，比背 API 参数有用得多。
 
-**为什么这是 Hook 而不是主循环的事**：主循环只管“把 messages 发给模型”，不管“messages 是不是太长了”。裁剪逻辑放在 Hook 里，和主循环解耦，可插拔、可配置。
+---
 
+## 二、Hook 和 Interceptor：先分清谁干哪种活
 
-
-**痛点三：工具偶发超时**
-
-**没有治理时**：工具调用超时或抛异常，主循环直接把异常往上抛，整个 Agent 会话崩掉。或者模型看到失败后，反复重试同一个工具，陷入死循环。
-
-**有 Hook 时**：
-
-- **`ToolRetryHook`**：对瞬时故障自动重试有限次数（如 2 次），带退避策略。
-- **工具内部兜底**：捕获异常，返回结构化的错误 JSON，让模型看到“失败了”这个观察结果，而不是崩掉会话。
-- **`ModelCallLimitHook`**：限制模型调用次数，防止模型在工具反复失败时无限空转烧钱。
-
-**关键设计**：工具失败不是“致命错误”，而是“一次可观察的结果”。Hook 把异常翻译成模型能理解的消息，让模型自己决定下一步（重试、换工具、告知用户）。
-
-
-
-**痛点四：工具上百个，Prompt 塞爆**
-
-**没有治理时**：所有工具的 description 全部塞进 System Prompt，几万个 token 起步。模型在 100 个工具里选，选错概率大增。而且每次新增工具都要改 Prompt。
-
-**有 Hook / Skills 时**：
-
-- **动态筛选**：根据当前对话上下文，只把相关的工具描述注入 Prompt。比如用户问天气，就只给 `get_weather`，不给订单工具。
-- **Skills 渐进披露**：工具按技能分组，先给模型看“有哪些技能类别”，模型选了类别再展开具体工具。减少一次性注入的 token 量。
-
-**为什么这是 Hook 的事**：工具筛选逻辑需要在模型调用前动态执行，依赖当前对话状态。主循环是静态的，不知道“这一轮该给哪些工具”。
-
-
-
-**痛点五：成本失控**
-
-**没有治理时**：ReAct 循环空转。模型反复推理、调工具、观察、再推理，每一步都是一次 API 调用。一个复杂任务可能跑 20 轮，成本是预期的 10 倍。
-
-**有 Hook 时**：
-
-- **`ModelCallLimitHook`**：限制单次执行的模型调用次数，超限则 `ERROR`（开发调试）或 `END`（生产优雅结束）。
-- **`ToolCallLimitHook`**：限制工具调用次数，防止某个工具被反复调用。
-- **Token 用量监控 Hook**：累计 token 消耗，超过阈值时告警或中断。
-
-**关键取舍**：`runLimit` 设太大等于没保护，设太小正常任务被误杀。经验值是“最复杂正常任务所需步数 × 1.5”。
-
-
-
-**痛点六：可观测性缺失**
-
-**没有治理时**：Agent 跑完只返回一个最终回复。你不知道它调了哪些工具、中间推理是什么、哪一步耗时最长、哪一步失败了。出了问题只能靠猜。
-
-**有 Hook 时**：在关键节点插入日志、埋点、追踪：
-
-- **模型调用前后**：记录输入 token 数、输出 token 数、耗时、模型名称。
-- **工具调用前后**：记录工具名、参数、返回、耗时、成功/失败。
-- **执行结束时**：汇总整个轨迹，输出结构化日志。
-
-## 3. Hook的运行机制执行顺序
-
-### 3.1 Hook vs Interceptor：先分清
-
-官方文档里两者都能干预 Agent的流程，但职责不同：
+官方文档里这两者都能干预 Agent 流程，但职责边界很清楚：
 
 | 特性 | **Hook** | **Interceptor** |
 | --- | --- | --- |
@@ -132,11 +63,13 @@ HumanInTheLoopHook 拦截
 | 中断恢复 | **支持**（如 HITL） | 一般不中断整图，只包一层调用 |
 | 典型用途 | 审批、摘要、调用上限、PII、Skills 装配 | 重试、日志、缓存、上下文编辑、工具选择 |
 
-HITL、配额、PII 这类操作，本质上是在改状态，甚至要把图节点运行停掉，这是 Hook 的用武之地。像工具失败重试三次、打点日志、临时改一下请求上下文，这类包一层就完事的，交给 Interceptor 更舒服。如果审批塞进 Interceptor，和 Checkpoint 对不上；简单重试又做成 Hook，又重得没必要。
+判断准则就一句话：**要不要动状态、要不要把整个图停下来**。
 
-### 3.2 agent调用生命周期
+HITL、配额、PII 这类操作本质上是在改状态，甚至要把图节点运行直接停掉，这是 Hook 的用武之地。而工具失败重试三次、打个日志、临时改一下请求上下文，这类"包一层就完事"的，交给 Interceptor 更轻快。如果把审批塞进 Interceptor，它和 Checkpoint 对不上，中断恢复会出问题；反过来把简单重试做成 Hook，又重得没必要。
 
-在多个 Hook 时一整次 `call` / `invoke` 的大致顺序：
+### 2.1 一次调用的执行顺序
+
+多个 Hook 并存时，一整次 `call` / `invoke` 的顺序大致是这样：
 
 ```text
 1. beforeAgent（按注册顺序）
@@ -150,11 +83,11 @@ HITL、配额、PII 这类操作，本质上是在改状态，甚至要把图节
 3. afterAgent（逆序）
 ```
 
-其规则和SpringAi底座篇讲的 Advisor「洋葱模型」同一套规则：
+规则和 Spring AI 底座篇讲的 Advisor「洋葱模型」是同一套：
 
 - **`before_*`：正序**（先注册的先跑）
 - **`after_*`：逆序**（后注册的先跑）
-- **Interceptor：嵌套包装**（第一个 interceptor 最外层）
+- **Interceptor：嵌套包装**（第一个 interceptor 在最外层）
 
 挂接方式：
 
@@ -169,11 +102,11 @@ ReactAgent agent = ReactAgent.builder()
         .build();
 ```
 
-一次 `invoke` / `call`调用，里面的 ReAct 可能会执行几轮「模型想 → 可能调工具 → 再想」的小循环。beforeModel` / ModelInterceptor / `afterModel等会在每次循环都被调用一次，而beforeAgent` / `afterAgent不管中间模型想了几轮、调了几次工具，这两头通常各一次。
+### 2.2 用时间线看清"每次"和"整次"的区别
 
-**用时间线来看看**
+这是最容易搞混的一点：一次 `invoke` / `call` 里面，ReAct 可能会跑好几轮"模型想 → 可能调工具 → 再想"的小循环。`beforeModel` / ModelInterceptor / `afterModel` **每一轮都会被调用一次**；而 `beforeAgent` / `afterAgent` 不管中间想了几轮、调了几次工具，两头各只跑一次。
 
-假设一次任务里：模型想完 → 调了搜索工具 → 再想一次 → 给出最终答案。
+假设一次任务是：模型想完 → 调了搜索工具 → 再想一次 → 给出最终答案。
 
 ```
 beforeAgent                    ← 只这一次
@@ -189,12 +122,12 @@ beforeAgent                    ← 只这一次
 afterAgent                     ← 只这一次
 ```
 
-所以：
+所以选型就很自然了：
 
-- 剪历史、加系统提示、模型前拦截 → 使用 `beforeModel`，每轮模型调用前都会生效。
-- 整次任务计时、开头装 Skills → 使用 `beforeAgent` / `afterAgent。`
+- **剪历史、加系统提示、模型前拦截** → 用 `beforeModel`，每轮模型调用前都会生效；
+- **整次任务计时、开头装配 Skills** → 用 `beforeAgent` / `afterAgent`。
 
-### 3.3 自定义 Hook 时怎么选基类
+### 2.3 自定义时怎么选基类
 
 | 基类 | 适合 | 返回 |
 | --- | --- | --- |
@@ -204,15 +137,15 @@ afterAgent                     ← 只这一次
 | **`ModelInterceptor`** | 改一次模型请求/响应、动态筛工具 | `ModelResponse` |
 | **`ToolInterceptor`** | 改一次工具调用：重试、缓存、监控 | `ToolCallResponse` |
 
-一般使用情况：
+对口选择：
 
-- 只做消息裁剪、塞一条 system 等→ `MessagesModelHook`
-- 要修改 state 里的业务字段（配额、用户等级）→ `ModelHook`
-- 整次调用计时、打开连接等 → `AgentHook`
-- 模型调用超时重试、按轮次筛选tool → `ModelInterceptor`
+- 只做消息裁剪、塞一条 system → `MessagesModelHook`
+- 要改 state 里的业务字段（配额、用户等级）→ `ModelHook`
+- 整次调用计时、打开连接 → `AgentHook`
+- 模型调用超时重试、按轮次筛选 tool → `ModelInterceptor`
 - 工具调用重试、结果缓存 → `ToolInterceptor`
 
-最省事的是 `MessagesModelHook`。比如模型调用前修剪历史：
+最省事的 `MessagesModelHook` 长这样（模型调用前修剪历史）：
 
 ```java
 @HookPositions({HookPosition.BEFORE_MODEL})
@@ -236,36 +169,36 @@ public class MessageTrimmingHook extends MessagesModelHook {
 }
 ```
 
-**`UpdatePolicy` 两个策略：**
+**`UpdatePolicy` 只有两个策略，但用错就是灾难**：
 
-- `REPLACE`：用新列表整表替换 messages
-- `APPEND`：往现有列表后面追加
+- `REPLACE`：用新列表整表替换 messages；
+- `APPEND`：往现有列表后面追加。
 
-在改历史长度的场景，几乎都用 REPLACE。APPEND追加更适合再塞一条提示词等场景。
+**改历史长度的场景几乎都用 REPLACE**。如果你在裁剪场景里误用 `APPEND`，历史不但没变短，反而每轮都多一份——上下文会以肉眼可见的速度膨胀。`APPEND` 适合的场景是"再塞一条提示词"这种增量操作。
 
-最后建议只是本轮临时计数（调了几次模型、有没有做过摘要等本次临时数据）最好放 `RunnableConfig.context()`，一般不放到 Checkpoint持久化。key 建议带上单独前缀，免得和业务字段撞名。需要跨轮持久的，再放到 state /Checkpoint持久化。关于OverAllState 、RunnableConfig.metadata、RunnableConfig.context的用法可以看我的上一篇 "03-别让 Agent 重启就失忆：Checkpoint 、压缩上下文、业务字段分离设计实战"的状态模型那一栏。
+最后一个建议：**本轮临时计数**（调了几次模型、有没有做过摘要这类只属于本次执行的数据）最好放 `RunnableConfig.context()`，一般不要写进 Checkpoint 持久化。key 建议带独立前缀，免得和业务字段撞名。确实需要跨轮持久的，再放到 state / Checkpoint。关于 `OverAllState`、`RunnableConfig.metadata`、`RunnableConfig.context` 的分工，可以回看上一篇"03-别让 Agent 重启就失忆"的状态模型那一节。
 
 ---
 
-## 4. Human-in-the-Loop
+## 三、Human-in-the-Loop：给危险操作装一道闸门
 
-### 4.1 `HumanInTheLoopHook` 是什么
+### 3.1 它拦在什么位置
 
-`umanInTheLoopHook`是 Spring AI Alibaba Agent 模块中**实现 “人在回路” 安全管控的核心组件**，本质是一个挂载在 Agent 执行流 `afterModel` 阶段的拦截钩子，专门对模型生成的工具调用（`tool_calls`）做风险拦截：高风险工具必须经过人工审批才能执行，低风险 / 查询类工具自动放行，是保障 AI Agent 业务操作安全的关键机制。
+`HumanInTheLoopHook` 是实现"人在回路"的核心组件，本质是一个挂在 **`afterModel` 阶段**的拦截钩子。这个挂载点选得非常讲究：
 
-**核心工作原理与触发时机**
+- 太早（beforeModel）：模型还没产出工具调用，你不知道要批什么；
+- 太晚（工具已执行）：钱已经打出去了，拦了个寂寞。
 
-1. **触发节点**：Agent 执行流程的 `afterModel` 阶段 —— 也就是大模型刚生成完回复、输出了 `tool_calls` 工具调用指令，但还没真正进入 Tool 节点执行工具之前。
-2. **判断逻辑**：
-   - 钩子拿到模型生成的所有工具调用请求，逐个校验工具名称是否在 `approvalOn` 注册的审批名单中
-   - **在名单内**：立即中断 Agent 执行流，返回 `InterruptionMetadata` 中断元数据，进入人工等待状态
-   - **不在名单内**：直接放行，工具正常执行，不打断流程
+`afterModel` 正好是**大模型刚生成完回复、输出了 `tool_calls`，但还没真正进入 Tool 节点执行**的那个瞬间——看到了意图，还没造成后果。这就是唯一正确的拦截时机。
 
-使用所有**写操作、不可逆操作、高风险操作**的场景，例如：订单退款、资金打款、删除生产数据、发送正式通知邮件、修改系统权限等，从机制上避免 AI 误调用造成业务损失。
+判断逻辑很朴素：钩子拿到模型生成的所有工具调用请求，逐个校验工具名是否在 `approvalOn` 注册的审批名单里。
 
-**配置方式与代码示例**
+- **在名单内**：立刻中断 Agent 执行流，返回 `InterruptionMetadata` 中断元数据，进入人工等待状态；
+- **不在名单内**：直接放行，工具正常执行，流程不打断。
 
-通过 Builder 模式构建 `HumanInTheLoopHook` 实例，用 `approvalOn` 方法注册需要人工审批的工具，支持为每个工具配置说明信息：
+所以它适用于所有**写操作、不可逆操作、高风险操作**：订单退款、资金打款、删除生产数据、发送正式通知邮件、修改系统权限等——从机制上杜绝 AI 误调用造成的业务损失。
+
+配置方式（Builder 模式，`approvalOn` 注册需要审批的工具）：
 
 ```java
 HumanInTheLoopHook hitl = HumanInTheLoopHook.builder()
@@ -276,31 +209,33 @@ HumanInTheLoopHook hitl = HumanInTheLoopHook.builder()
         .build();
 ```
 
-**硬性前提：必须配置 Checkpointer（Saver）**
+### 3.2 硬性前提：必须配 Saver
 
-人在环能力强依赖**状态持久化组件 Checkpointer（也叫 Saver）**，这是必要前提：
+这条不是建议，是**必须**。人在环能力强依赖状态持久化组件 Checkpointer（也就是 Saver），原因很直白：
 
-- 中断发生时，Agent 的完整执行状态（对话上下文、执行进度、中间状态、待执行工具信息）必须通过 Saver 落盘持久化
-- 人工审核完成后，需要用**同一个 threadId** 去恢复执行，Saver 会根据 threadId 还原中断前的状态
-- 如果没有配置 Saver，中断后状态会丢失，恢复执行时会丢失上下文，相当于 “失忆”，无法接续之前的流程。
+- 中断发生时，Agent 的完整执行状态（对话上下文、执行进度、中间状态、待执行的工具信息）必须通过 Saver 落盘；
+- 人工审核完成后，要用**同一个 threadId** 恢复执行，Saver 靠它还原中断前的状态；
+- 没配 Saver，中断后状态就丢了，恢复时相当于"失忆"，根本接不上之前的流程。
 
-### 4.2 批设计原则
+上一篇文章讲的 Checkpoint，在这里第一次真正显示出价值：它不只是"重启续聊"，更是**"暂停几小时后从断点继续"**的技术基础。
 
-1. **最小审批原则**：只把高风险工具加入审批名单，纯查询类工具（查订单、查物流、查天气等）不要加入，避免过度拦截导致交互卡顿、人工审核负担过重。
-2. **描述面向人工**：`description` 是写给审核人员看的，要明确说明操作风险点，比如涉及的金额、订单号、操作是否可撤销等关键信息。
-3. **命名严格一致**：`approvalOn` 里写的工具名，必须和 `@Tool` 注解、`FunctionToolCallback` 中定义的工具 `name` 完全一致，否则会匹配失败、拦截失效。
+### 3.3 审批名单的三条设计原则
 
-### 4.3 标准执行流程：中断 → 人工审核 → 恢复执行
+1. **最小审批原则**：只把高风险工具加入名单，纯查询类（查订单、查物流、查天气）一律不要加。否则每次对话都弹审批，交互卡成一团，人工审核也会被无意义的点击淹没。
+2. **描述面向人工**：`ToolConfig.description` 是**写给审核人员看的**，要说清风险点——涉及多少金额、哪个订单号、操作是否可撤销。审核人要在三秒内判断批不批，描述就得给得起这个判断。
+3. **命名严格一致**：`approvalOn` 里写的工具名，必须和 `@Tool` 注解或 `FunctionToolCallback` 定义的工具 `name` **完全一致**。这条最不起眼，也最容易出错——名字对不上不会报错，只会**静默失效**，你以为拦住了，其实一路绿灯。
 
-官方标准是**两段式调用**模式，完整流程如下：
+### 3.4 标准流程：中断 → 人工审核 → 恢复执行
 
-1. **第一次调用：触发中断** 传入用户问题和 `RunnableConfig`（携带唯一 `threadId`），调用 `invokeAndGetOutput`。 如果命中审批规则，返回值会是 `InterruptionMetadata` 类型，里面包含待审核的工具名称、参数、描述等信息。
-2. **人工审核环节** 业务系统通过 UI 或接口把待审信息展示给审核人，审核人给出决策：批准、修改参数、拒绝。
-3. **第二次调用：恢复执行** 用**同一个 threadId** 构建恢复配置，把人工审批结果放入 `metadata` 的 `HUMAN_FEEDBACK_METADATA_KEY` 中，再次调用 `invokeAndGetOutput`（用户输入传空字符串，避免被当成新问题冲掉上下文），Agent 会从中断点继续执行。
+官方标准是**两段式调用**，完整流程三步：
 
-**核心代码骨架**：
+1. **第一次调用（触发中断）**：传入用户问题和携带 `threadId` 的 `RunnableConfig`，调用 `invokeAndGetOutput`。命中审批规则时，返回值是 `InterruptionMetadata` 类型，里面有待审核的工具名称、参数、描述等信息。
+2. **人工审核环节**：业务系统通过 UI 或接口把待审信息展示给审核人，审核人给出决策——批准、修改参数、拒绝。
+3. **第二次调用（恢复执行）**：用**同一个 threadId** 构建恢复配置，把审批结果放进 metadata 的 `HUMAN_FEEDBACK_METADATA_KEY`，再次调用 `invokeAndGetOutput`（**用户输入传空字符串**，避免被当成新问题冲掉上下文），Agent 从中断点继续。
 
-```
+代码骨架：
+
+```java
 // 1. 首次调用，携带threadId
 RunnableConfig config = RunnableConfig.builder().threadId(threadId).build();
 Optional<?> first = agent.invokeAndGetOutput("帮我把订单 O001 退款 199 元", config);
@@ -330,56 +265,45 @@ if (first.isPresent() && first.get() instanceof InterruptionMetadata interruptio
 }
 ```
 
-**三种人工决策类型**：
+三种人工决策：
 
-| 决策结果           | 效果                                                       |
-| ------------------ | ---------------------------------------------------------- |
-| `APPROVED`（批准） | 按模型原参数执行工具调用                                   |
-| `EDITED`（编辑）   | 人工修改工具参数（arguments）后再执行                      |
+| 决策结果 | 效果 |
+| --- | --- |
+| `APPROVED`（批准） | 按模型原参数执行工具调用 |
+| `EDITED`（编辑） | 人工修改工具参数（arguments）后再执行 |
 | `REJECTED`（拒绝） | 不执行该工具；可在描述中填写拒绝原因，供后续模型向用户解释 |
 
-> 一次模型输出如果包含多个待审批工具，需要在同一个 `InterruptionMetadata` 中逐个给出决策，支持三种结果混合使用。
+> 一次模型输出如果包含多个待审批工具，需要在同一个 `InterruptionMetadata` 中逐个给出决策，三种结果可以混合使用。
 
-### 4.4 人工修改状态后再继续
+### 3.5 人工不止能批驳，还能改状态
 
-工审核环节不仅可以批 / 驳工具，还可以修改执行状态后再恢复，常见两种场景：
+审核环节的权力比"批 / 驳"大得多，常见两种进阶用法：
 
-1. **修改工具参数（EDITED）**：最常用的场景。比如模型申请退款 999 元，人工审核时修改为 199 元，再批准执行，只需要修改 `ToolFeedback` 中的 `arguments` 即可。
-2. **修改业务状态字段**：在构建反馈时保留 `interruption.state()`，业务代码可以在恢复前修改 State 中的业务字段（比如标记 `need_human=false`、记录审批人 `refund_approved_by=ops01`），再写入反馈；Agent 恢复执行后，后续节点可以读取这些修改后的状态字段。
+1. **修改工具参数（EDITED）**：最常用的场景。模型申请退款 999 元，人工审核改成 199 元再批准——只需要改 `ToolFeedback` 里的 `arguments`。这相当于给了人类一个"最后修正权"，模型的判断不是终点。
+2. **修改业务状态字段**：构建反馈时保留 `interruption.state()`，业务代码可以在恢复前修改 State 里的业务字段（比如标记 `need_human=false`、记录审批人 `refund_approved_by=ops01`）再写入反馈。Agent 恢复后，后续节点能读到这些被改过的字段。**这实际上给了人类一个直接干预 Agent 状态的入口**，做审计留痕、加审批人标记都很方便。
 
-**键注意事项**
+两个必须守住的注意事项：
 
-- 恢复执行时 `threadId` 必须和中断时完全一致，否则无法还原状态。
-- 第二次调用 `invokeAndGetOutput` 时，用户输入通常传**空字符串**，避免被 Agent 识别为新一轮用户提问，覆盖掉中断前的上下文。
+- 恢复执行时 `threadId` **必须和中断时完全一致**，否则还原不了状态——这是新手最常见的"为什么恢复后它又问一遍"的原因；
+- 第二次调用时用户输入通常传**空字符串**。传了内容会被当成新一轮用户提问，覆盖掉中断前的上下文，审批白做。
 
-## 5. Context Engineering（上下文工程）
+---
 
-上下文工程是 Spring AI Alibaba Agent 体系中**生产级落地的核心能力集**，核心思想是：**在输入送入大模型之前，通过框架内置的拦截器 / 钩子，主动对上下文（对话消息、工具集、指令、状态、调用次数等）进行管控、优化和治理**，而不是完全依赖大模型自身的能力去处理长上下文、规避风险、控制成本。
+## 四、上下文工程：在送进模型之前就管好
 
-它解决的是 Demo 到生产之间的核心痛点：token 溢出、成本失控、工具滥用、执行死循环、上下文冗余、高风险操作不可控、能力过多导致 token 爆炸等。下面逐个拆解核心组件：
+上下文工程是 Spring AI Alibaba Agent 体系里**生产级落地的核心能力集**。它的核心思想可以用一句话概括：
 
-### 5.1 上下文压缩：SummarizationHook
+> **在输入送入大模型之前，主动对上下文（对话消息、工具集、指令、状态、调用次数等）进行管控和优化，而不是指望大模型自己处理长上下文、规避风险、控制成本。**
 
-长对话下的「软截断」方案，用摘要保留历史核心信息，避免直接硬截断丢失关键事实。
+它填的是 Demo 到生产之间的那道沟：token 溢出、成本失控、工具滥用、执行死循环、上下文冗余、高风险操作不可控、能力过多导致 token 爆炸。下面逐个拆。
 
-**核心定位**：长对话下的「软截断」方案，用摘要保留历史核心信息，避免直接硬截断丢失关键事实。
+### 4.1 软压缩：`SummarizationHook`
 
-**解决的问题**
+长对话下有两条路：硬删（丢信息）和摘要（保事实）。`SummarizationHook` 走后者，是**"软截断"**方案。
 
-随着对话轮次增加，上下文 token 量会逼近模型上限。如果直接硬删除最早的消息，会丢失用户身份、历史约定、关键事实等重要信息；如果全量保留，会触发 token 超限报错。
+它挂在模型调用前，执行逻辑是：每次调模型前统计当前上下文的 token 总量 → 达到 `maxTokensBeforeSummary` 阈值时触发压缩 → 用指定模型（可以配成更便宜的轻量模型）把较早的对话历史压成一段摘要 → 最终送入主模型的上下文 = **历史摘要 + 最近 N 条原始对话消息**。
 
-**工作原理**
-
-它是一个挂载在模型调用前的 Agent Hook，执行逻辑：
-
-1. 每次调用模型前，统计当前上下文的 token 总量
-2. 当 token 量达到 `maxTokensBeforeSummary` 阈值时，触发压缩
-3. 调用指定的模型（可以是更便宜的轻量模型），将较早的对话历史压缩成一段摘要
-4. 最终送入主模型的上下文 = 历史摘要 + 最近 N 条原始对话消息
-
-**配置示例**
-
-```
+```java
 SummarizationHook summarizationHook = SummarizationHook.builder()
         .model(chatModel)               // 执行摘要的模型，可换成低成本小模型
         .maxTokensBeforeSummary(4000)   // token 阈值：达到4000时触发压缩
@@ -387,86 +311,73 @@ SummarizationHook summarizationHook = SummarizationHook.builder()
         .build();
 ```
 
-**特点与适用场景**
+对比硬截断，它能保住"用户叫张三、收货地址在杭州、之前约定过退款规则"这类核心事实，上下文质量明显更高；代价是每次压缩多一次模型调用，产生额外成本和一点点延迟。
 
-- 对比硬截断：能保留「用户叫张三、收货地址在杭州、之前约定过退款规则」这类核心事实，上下文质量更高
-- 代价：每次压缩会多一次模型调用，产生额外成本和延迟
-- 生产最佳实践：`SummarizationHook` 保障上下文质量 + `ModelCallLimitHook` 控制整体调用成本
-- 适用：需要保留历史上下文的长会话场景（客服、私人助理）
+生产上的经典组合是：**`SummarizationHook` 保上下文质量 + `ModelCallLimitHook` 控整体调用成本**。适合长会话场景（客服、私人助理）。
 
-### 5.2 上下文裁剪：ContextEditingInterceptor
+### 4.2 硬裁剪：`ContextEditingInterceptor`
 
-**核心定位**：按策略硬清理上下文的「硬裁剪」方案，低成本快速腾出 token 空间。
+这是**"硬裁剪"**方案，纯框架层面的按策略清理，不需要额外模型调用，成本低、见效快。
 
-**解决的问题**
+执行逻辑：送入 LLM 前检查上下文规模 → token 量达到 `trigger` 触发阈值时启动裁剪 → 按策略（通常从最早的消息开始删）至少清理出 `clearAtLeast` 指定的 token 空间。
 
-上下文存在大量冗余、低价值的历史消息，不需要全部保留，需要按规则批量清理，快速降低 token 占用。
-
-**工作原理**
-
-它是一个模型调用前的拦截器，执行逻辑：
-
-1. 送入 LLM 前检查上下文规模
-2. 当 token 量达到 `trigger` 触发阈值时，启动裁剪
-3. 按照策略（通常从最早的消息开始删）至少清理出 `clearAtLeast` 指定的 token 量
-
-**配置示例**
-
-```
+```java
 ContextEditingInterceptor editing = ContextEditingInterceptor.builder()
         .trigger(12000)       // 上下文达到12000 token时触发裁剪
         .clearAtLeast(6000)   // 至少清理出6000 token空间
         .build();
 ```
 
-**压缩 vs 裁剪 核心区别**
+两者怎么选：
 
-| 维度     | Context Compaction（SummarizationHook）  | Context Editing（ContextEditingInterceptor） |
-| -------- | ---------------------------------------- | -------------------------------------------- |
-| 核心思路 | 总结替换：旧内容提炼成摘要，保留核心信息 | 按策略删除：直接裁掉旧内容，不保留           |
-| 信息损失 | 低，关键事实可保留在摘要中               | 高，被裁剪的消息直接丢失                     |
-| 额外成本 | 有，需要额外调用一次摘要模型             | 无，纯框架层面逻辑处理                       |
-| 适用场景 | 对历史信息依赖强的长对话                 | 对历史依赖弱、轮次极多的场景                 |
+| 维度 | Context Compaction（`SummarizationHook`） | Context Editing（`ContextEditingInterceptor`） |
+| --- | --- | --- |
+| 核心思路 | 总结替换：旧内容提炼成摘要，保留核心信息 | 按策略删除：直接裁掉旧内容，不保留 |
+| 信息损失 | 低，关键事实可保留在摘要中 | 高，被裁剪的消息直接丢失 |
+| 额外成本 | 有，需要额外调用一次摘要模型 | 无，纯框架层面逻辑处理 |
+| 适用场景 | 对历史信息依赖强的长对话 | 对历史依赖弱、轮次极多的场景 |
 
-> 两者可以同时挂载，但需要注意执行顺序，避免重复修改上下文导致异常，建议通过日志确认执行先后。
+> 两者可以同时挂载，但要注意执行顺序，避免重复修改上下文导致异常，建议先用日志确认谁先谁后。
 
-**删除内容时注意：**
+### 4.3 裁剪的两条铁律
 
-**第一点：**
+不管是自己写 Hook 裁剪还是用框架能力，有两条结构约束必须守住。它们不会报"裁剪逻辑有 bug"，只会报一个看起来莫名其妙的 API 错误，所以值得单独记牢。
 
-许多模型厂商（尤其是 Anthropic Claude 系列，以及部分 OpenAI 兼容网关）对 `messages` 数组的结构有强校验：
+**铁律一：`messages[0]` 必须是 user 消息**
+
+许多模型厂商（尤其 Anthropic Claude 系列，以及部分 OpenAI 兼容网关）对 `messages` 数组结构有强校验：
 
 ```
 messages[0].role 必须是 "user"
 ```
 
-如果你裁剪历史时，把开头的 `UserMessage` 删掉了，让列表变成以 `AssistantMessage` 或 `ToolResponseMessage` 开头，API 会直接拒绝请求。比如用 `MessageWindowChatMemory` 做滑动窗口时，它按“条数”裁剪，而不是按“轮次”裁剪。比如窗口大小设为 20，对话轮次多了之后，它可能把最早的一条 `UserMessage` 删掉，留下一条孤零零的 `AssistantMessage` 作为列表开头。
+如果裁剪把开头的 `UserMessage` 删掉了，让列表以 `AssistantMessage` 或 `ToolResponseMessage` 开头，API 会**直接拒绝请求**。
 
-**避免方法**：
+最容易中招的是"按条数"的滑动窗口。比如 `MessageWindowChatMemory` 窗口设为 20，它按条数裁而不是按轮次裁，聊久了就可能把最早那条 `UserMessage` 淘汰掉，留下一条孤零零的 `AssistantMessage` 挂在列表开头。
 
-1、按轮次裁剪，而不是按条数。一轮 = `UserMessage` + `AssistantMessage`（+ 可能的 `ToolResponseMessage`）。删就删整轮。
+避免方法：
 
-2、如果自己实现裁剪逻辑，裁剪后检查 `messages.get(0).getMessageType() == USER`，不是就继续往前删，直到满足。
+1. **按轮次裁剪，不要按条数**。一轮 = `UserMessage` + `AssistantMessage`（+ 可能的 `ToolResponseMessage`），删就删整轮；
+2. 自己实现的话，裁完检查 `messages.get(0).getMessageType() == USER`，不是就继续往前删直到满足；
+3. 用框架自带 memory 时，先确认它的窗口策略是"保留最近 N 轮"还是"最近 N 条"——**前者安全，后者容易踩坑**。
 
-3、用框架自带的 memory 时，确认它的窗口策略是“保留最近 N 轮”还是“最近 N 条”。前者安全，后者可能踩坑。
+**铁律二：`tool_calls` 和它的响应是原子配对**
 
-**第二点**：**更常见**的一条
-
-像OpenAI、Anthropic、DashScope 等几乎所有支持 function calling 的厂商都强制要求：
+这条比第一条更常见。几乎所有支持 function calling 的厂商（OpenAI、Anthropic、DashScope 等）都强制要求：
 
 ```
 AssistantMessage(toolCalls=[call_abc]) 
     → 必须紧跟 ToolResponseMessage(id=call_abc)
 ```
 
-这两条消息是**原子配对**的，不能拆开。如果你删掉了 `ToolResponseMessage`，只留下带 `toolCalls` 的 `AssistantMessage`，API 会报：
+如果删掉了 `ToolResponseMessage`，只留下带 `toolCalls` 的 `AssistantMessage`，API 会报：
 
 ```
 An assistant message with 'tool_calls' must be followed by tool messages 
 responding to each 'tool_call_id'.
 ```
 
-用“按条数裁剪”的滑动窗口时，最容易出现这种情况：
+按条数滑动的窗口最容易制造这种事故：
 
 ```
 ... 
@@ -475,9 +386,9 @@ responding to each 'tool_call_id'.
 [19] AssistantMessage(text="成都今天晴，25℃")
 ```
 
-窗口往前滑动，`[18]` 被淘汰，但 `[17]` 还在。下一轮请求发出去，API 直接 400。
+窗口往前滑一格，`[18]` 被淘汰而 `[17]` 还在，下一轮请求发出去就是 400。
 
-**更隐蔽的情况**：一轮里模型调了多个工具：
+**更隐蔽的变体**：一轮里模型同时调多个工具——
 
 ```
 AssistantMessage(toolCalls=[call_1, call_2, call_3])
@@ -486,47 +397,33 @@ ToolResponseMessage(id=call_2)   ← 这条被裁掉
 ToolResponseMessage(id=call_3)
 ```
 
-只删了中间一条，API 也会报错：`tool_call_id call_2 not found`。
+只删中间一条也报错：`tool_call_id call_2 not found`。
 
-**避免方法：**
+避免方法：
 
-1、**按“工具调用组”裁剪**：一个 `AssistantMessage(toolCalls=[...])` 加上它后面所有的 `ToolResponseMessage`，视为一个**不可分割的原子块**。要删就整块删，要么全留。
+1. **按"工具调用组"裁剪**：把 `AssistantMessage(toolCalls=[...])` 加上它后面所有的 `ToolResponseMessage` 视为一个**不可分割的原子块**，要删整块删，要么全留；
+2. 自己实现的话，裁完做一次**配对校验**：遇到带 `toolCalls` 的 assistant 就检查后面是否每个 `toolCallId` 都有响应，缺了就把这个 assistant 一并删掉；
+3. 用框架自带 memory 时，确认它有没有处理工具消息配对——有些简单实现只按条数裁，不管配对。
 
-2、如果自己实现裁剪，裁剪后做一次**配对校验**：遍历 messages，遇到带 `toolCalls` 的 assistant，检查后面是否有对应每个 `toolCallId` 的 tool 响应。缺失就把这个 assistant 也删掉。
+### 4.4 双层限流：模型 + 工具
 
-3、用框架自带的 memory 时，确认它是否处理了工具消息的配对。有些简单实现只按条数裁，不管配对，就会踩坑。
+**`ModelCallLimitHook`** 管的是 ReAct 死循环。模型陷入"思考 → 调工具 → 再思考"出不来时，它会限制单次运行内模型的最大调用次数，达到上限触发预设退出行为。
 
-### 5.3 调用次数限流：模型 + 工具双层限流
-
-#### 5.3.1 模型调用限流：ModelCallLimitHook
-
-**解决的问题**：ReAct 模式下模型容易陷入 “思考→调用工具→再思考→再调用” 的死循环，导致 token 成本飙升、执行超时。
-
-**工作原理**：限制单次 Agent 运行内，大模型的最大调用次数，达到上限后触发预设的退出行为。
-
-**配置示例**
-
-```
+```java
 ModelCallLimitHook modelLimit = ModelCallLimitHook.builder()
         .runLimit(8)    // 单次运行内，模型最多调用8次
         .exitBehavior(ModelCallLimitHook.ExitBehavior.ERROR) // 超限行为：抛错
         .build();
 ```
 
-**两种退出行为**：
+两种退出行为的选择很关键：
 
-- `ERROR`：直接抛出异常，适合开发测试阶段，快速暴露死循环问题
-- `END`：直接结束 Agent 运行，返回友好的结束语，适合生产环境，避免报错影响用户
+- `ERROR`：直接抛异常，适合**开发测试阶段**，能快速暴露死循环问题；
+- `END`：直接结束运行并返回友好结束语，适合**生产环境**，避免报错吓到用户。
 
-#### 5.3.2 工具调用限流：ToolCallLimitHook
+**`ToolCallLimitHook`** 管的是工具被滥用，尤其高风险写操作（退款、删数据）。它可以针对全局，也可以指定单个工具，分别限制「单次运行内次数」和「单会话累计次数」：
 
-**解决的问题**：防止工具被频繁调用，尤其是高风险写操作工具（退款、删数据）被滥用，同时控制单会话的工具调用总量。
-
-**工作原理**：可以针对全局所有工具，也可以指定单个工具，分别限制「单次运行内调用次数」和「单会话累计调用次数」。
-
-**配置示例**
-
-```
+```java
 ToolCallLimitHook toolLimit = ToolCallLimitHook.builder()
         .toolName("refund_order")  // 可选：只限制退款工具；不填则限制全部工具
         .threadLimit(20)           // 整个会话内，该工具最多调用20次
@@ -535,55 +432,32 @@ ToolCallLimitHook toolLimit = ToolCallLimitHook.builder()
         .build();
 ```
 
-**设计建议**：
+设计建议：查询类工具（查订单、查物流）限制放宽，保障交互流畅；高风险写操作（退款、打款、删数据）限制严格，`runLimit` 压低。
 
-- 查询类工具（查订单、查物流）限制可以宽松，保障交互流畅
-- 高风险写操作工具（退款、打款、删数据）限制要严格，runLimit 设低
+### 4.5 工具重试：`ToolRetryInterceptor`
 
-### 5.4 工具重试：ToolRetryInterceptor
+工具调用经常遇到瞬时故障：网络超时、下游 5xx、临时限流。这些直接判失败既没必要又伤体验，于是有了这个工具层面的拦截器：失败时自动重试，达到最大次数后执行预设失败策略。
 
-**心定位**：处理工具瞬时故障的容错机制，提升 Agent 整体可用性。
-
-**解决的问题**
-
-工具调用经常会遇到瞬时故障：网络超时、下游服务 5xx、临时限流等，直接失败会中断流程、影响体验，没必要直接终止。
-
-**工作原理**
-
-它是工具调用层面的拦截器，工具调用失败时自动重试，达到最大重试次数后执行预设的失败策略。
-
-**配置示例**
-
-```
+```java
 ToolRetryInterceptor toolRetry = ToolRetryInterceptor.builder()
         .maxRetries(2)  // 最多重试2次
         .onFailure(ToolRetryInterceptor.OnFailureBehavior.RETURN_MESSAGE)
         .build();
 ```
 
-**核心要点**
+三个要点：
 
-1. **必须设上限**：禁止无界重试，避免雪崩效应，生产环境建议 1~2 次
-2. **写操作要幂等**：退款、打款这类写操作工具，自身必须保证幂等（同一订单号重复调用不会重复执行），否则重试会造成资产损失
-3. **失败降级**：`RETURN_MESSAGE` 策略会把错误信息作为观察结果返回给模型，由模型决定下一步处理（比如换方式、告知用户），而不是直接让 Agent 崩溃
+1. **必须设上限**：禁止无界重试，否则下游抖动时会引发雪崩。生产建议 1~2 次；
+2. **写操作要幂等**：退款、打款这类工具**自身必须保证幂等**（同一订单号重复调用不会重复执行），否则重试直接造成资产损失——这是重试机制最危险的副作用；
+3. **失败降级**：`RETURN_MESSAGE` 把错误信息作为观察结果返回给模型，由模型决定下一步（换方式、告知用户），而不是让 Agent 崩溃。
 
-> 补充：还有对应的 `ModelRetryInterceptor`，专门处理模型调用侧的瞬时错误（网络超时、限流），和工具重试是两层独立的容错机制。
+> 补充：还有对应的 `ModelRetryInterceptor`，专门处理模型调用侧的瞬时错误（网络超时、限流）。它和工具重试是两层独立的容错，别互相替代。
 
-### 5.5 任务规划：TodoListInterceptor
+### 4.6 任务规划：`TodoListInterceptor`
 
-**核心定位**：复杂多步任务的「先规划、后执行」机制，提升执行逻辑性和透明度。
+复杂多步任务（调研、跨系统操作）里，模型容易走一步看一步，出现漏步骤、重复操作、逻辑混乱，而且执行过程完全不透明。这个拦截器在正式执行前**强制模型先输出一份待办清单**，明确步骤和目标，确认规划后再一步步执行。
 
-**解决的问题**
-
-复杂多步任务（比如调研、跨系统操作）中，模型容易走一步看一步，出现漏步骤、重复操作、逻辑混乱的问题，且执行过程不透明。
-
-**工作原理**
-
-它是一个执行前拦截器，在正式执行任务前，强制模型先输出一份待办清单（Todo List），明确执行步骤和目标，确认规划后再一步步执行。
-
-**配置示例**
-
-```
+```java
 TodoListInterceptor planning = TodoListInterceptor.builder().build();
 
 ReactAgent agent = ReactAgent.builder()
@@ -594,34 +468,21 @@ ReactAgent agent = ReactAgent.builder()
         .build();
 ```
 
-**适用场景与注意事项**
+适合复杂调研、多系统编排、需要向用户展示执行计划的透明场景；**不适合简单一问一答**，那会白白多一轮规划调用，增加延迟和成本。
 
-- 适合：复杂调研、多系统编排、需要向用户展示执行计划的透明场景
-- 不适合：简单一问一答场景，会多一轮规划的模型调用，增加不必要的延迟和成本
+### 4.7 动态工具选择：让模型别在 100 个工具里挑
 
-### 5.6 动态工具选择
+工具太多会带来三个问题：token 占用高、模型容易选错、权限难管控。主流有两种解法。
 
-**核心定位**：解决「工具太多→token 占用高、模型易选错、权限难管控」的问题，按需暴露工具。
+**方案一：LLM 自动选工具 —— `ToolSelectionInterceptor`**。它在主模型调用前加一层轻量决策：先让模型从全量候选工具里挑出与当前问题相关的，只把选中的暴露给本次主模型调用，大幅减少上下文中的工具定义数量。
 
-工具数量多了之后，把所有工具定义全塞进上下文，会占用大量 token，还会增加模型选错工具的概率，也不好做权限控制。主流有两种实现方案：
-
-**方案 1：LLM 自动选工具 —— ToolSelectionInterceptor**
-
-**工作原理**：增加一层轻量决策，先让模型从全量候选工具中，挑选出当前问题相关的工具，只把选中的工具暴露给本次主模型调用，大幅减少上下文中的工具定义数量。
-
-**配置**：
-
-```
+```java
 ToolSelectionInterceptor selector = ToolSelectionInterceptor.builder().build();
 ```
 
-**方案 2：自定义规则动态控权 —— 自定义 ModelInterceptor**
+**方案二：自定义规则动态控权 —— 自定义 `ModelInterceptor`**。适合按角色、权限、用户等级等业务规则控制工具可见性，**比自动选择更可控**（自动选择有概率漏，规则不会）：
 
-适合基于角色、权限、用户等级等业务规则，动态控制工具可见性，比自动选择更可控。
-
-**示例：按用户角色分配工具**
-
-```
+```java
 public class RoleBasedToolInterceptor extends ModelInterceptor {
     @Override
     public ModelResponse interceptModel(ModelRequest request, ModelCallHandler handler) {
@@ -646,25 +507,21 @@ public class RoleBasedToolInterceptor extends ModelInterceptor {
 }
 ```
 
+注意这里的价值不只是省 token——**工具不可见本身就是一种权限控制**。普通用户连 `refund_order` 的名字都看不到，从源头杜绝了越权调用的可能。
+
 > 补充：还可以通过 `dynamicToolCallbacks(...)` 在运行时动态追加工具，比如高级会员解锁专属能力。
 
-### 5.7 Skills 渐进披露（Progressive Disclosure）
+### 4.8 Skills 渐进披露（Progressive Disclosure）
 
-**核心定位**：Agent 能力的按需加载机制，解决「能力太多→上下文爆炸、模型混淆」的问题。
+如果 Agent 有几十上百个技能，把所有技能的说明、工具、规则全塞进上下文，token 会爆炸，模型也容易混淆不同技能的规则。Skills 用「渐进披露」解决：**不用的技能不占上下文，需要时才加载**。
 
-**解决的问题**
+**三层加载机制**：
 
-如果 Agent 有几十上百个技能，把所有技能的说明、工具、规则全部塞进上下文，token 会爆炸，模型也容易混淆不同技能的规则。Skills 机制采用「渐进披露」的思路，不用的技能不占上下文，需要的时候再加载。
+1. **元数据层**：只有技能的 `name + description`，体积很小，几乎常驻上下文。相当于一本**技能目录**，让模型知道"我会些什么"。
+2. **SKILL.md 正文层**：技能的详细规则、使用说明、注意事项。只有模型主动调用 `read_skill` 工具后，才加载到上下文。
+3. **资产层**：技能对应的脚本、参考资料、配置文件等，真正执行时才按需加载。
 
-**三层加载机制**
-
-1. **元数据层**：只有技能的 `name + description`，几乎常驻上下文，体积很小，相当于技能目录，让模型知道有哪些能力
-2. **SKILL.md 正文层**：技能的详细规则、使用说明、注意事项，只有模型主动调用 `read_skill` 工具后，才会加载到上下文
-3. **资产层**：技能对应的脚本、参考资料、配置文件等，真正执行时才按需加载
-
-**技能结构约定**
-
-目录结构：
+**目录结构约定**：
 
 ```
 skills/
@@ -672,9 +529,9 @@ skills/
     └── SKILL.md
 ```
 
-SKILL.md 最小形态：
+SKILL.md 的最小形态（带 YAML front matter）：
 
-```
+```markdown
 ---
 name: refund-policy
 description: "电商退款政策与操作要点。用户问退款规则、几日内可退、如何发起退款时使用。"
@@ -686,11 +543,9 @@ description: "电商退款政策与操作要点。用户问退款规则、几日
 3. 禁止承诺「一定能退」。
 ```
 
-**装配与工作流程**
+**装配方式**：注册技能 → 构建技能钩子 → 挂到 Agent。
 
-**装配示例**：
-
-```
+```java
 // 1. 注册技能：从指定目录加载所有技能
 SkillRegistry registry = FileSystemSkillRegistry.builder()
         .projectSkillsDirectory("classpath:skills")
@@ -710,20 +565,17 @@ ReactAgent agent = ReactAgent.builder()
         .build();
 ```
 
-**执行流程**：
+**执行流程**：模型初始只能看到所有技能的元数据（名称 + 描述）→ 判断当前问题需要某个技能时，调用 `read_skill` 读取详情 → 拦截器把该技能的规则和工具注入后续模型请求 → 模型基于完整技能信息执行任务。
 
-1. 模型初始只能看到所有技能的元数据（名称 + 描述）
-2. 当判断当前问题需要某个技能时，模型调用 `read_skill` 工具读取该技能详情
-3. 拦截器将该技能对应的规则、工具注入到后续的模型请求上下文中
-4. 模型基于完整的技能信息执行任务
+这个"目录 → 打开 → 执行"的三段式，既保留了 Agent 的丰富能力，又避免全量加载的浪费，是中大型 Agent 系统的标准设计。
 
-这种方式既保留了 Agent 的丰富能力，又避免了全量加载导致的 token 浪费，是中大型 Agent 系统的标准设计。
+---
 
+## 五、动手验证：一个带审批的客服 Agent
 
+场景是电商客服：能查订单、能退款（但退款必须人工审批）、会用退款政策技能、工具抖动自动重试、对话长了自动压缩。下面这份代码把前面所有治理组件串在了一起。
 
-### 6.1 案例
-
-先准备技能文件（放在项目 `src/main/resources/skills/refund-policy/SKILL.md`；本地开发也可用文件系统目录，见下方注释）：
+先准备技能文件（放在 `src/main/resources/skills/refund-policy/SKILL.md`；本地开发也可用文件系统目录，见代码注释）：
 
 ```markdown
 ---
@@ -1012,7 +864,13 @@ public class ACustomerServiceHookDemo {
 }
 ```
 
-### 6.2 建议自测顺序
+代码里几个和正文知识点对得上的细节，读的时候留意：
+
+- `queryFailBudget` 故意让 `query_order` 前两次抛异常，用来验证 `ToolRetryInterceptor` 的重试；
+- 服务端用 `pendingByThread` 按 threadId 缓存中断快照，`resume` 接口不必再回传 pending——**真实系统应该把中断落库，而不是放内存 Map**，这里是 Demo 才这么省事；
+- `toPendingView` 手动抽字段，是因为 `InterruptionMetadata` 直接交给 Jackson 序列化会丢字段，显式 DTO 才稳。
+
+### 自测顺序
 
 以下均用 `Content-Type: application/json`。
 
@@ -1028,7 +886,7 @@ public class ACustomerServiceHookDemo {
 }
 ```
 
-期望：会调 `read_skill`（`refund-policy`），再基于 SKILL.md 回答。
+期望：会调 `read_skill`（`refund-policy`），再基于 SKILL.md 回答。这验证了渐进披露的第二层——**技能正文不是常驻的，是模型主动读进来的**。
 
 **② 查订单（验证工具重试 / 查询）**
 
@@ -1073,7 +931,7 @@ public class ACustomerServiceHookDemo {
 }
 ```
 
-确认：`status=interrupted`，且 `pending.toolFeedbacks[0].name` 为 `refund_order`。服务端已按 `threadId` 缓存完整中断态，**resume 不必再带 pending**。
+确认：返回 `status=interrupted`，且 `pending.toolFeedbacks[0].name` 为 `refund_order`。服务端已按 `threadId` 缓存完整中断态，**resume 不必再带 pending**。
 
 **④ 批准（APPROVED）后继续**
 
@@ -1088,7 +946,7 @@ public class ACustomerServiceHookDemo {
 }
 ```
 
-期望：`status=completed`，退款工具真正执行（金额仍为模型申请的 199）。
+期望：`status=completed`，退款工具真正执行（金额仍是模型申请的 199）。
 
 **⑤ 再测 EDITED（改小金额）**
 
@@ -1117,7 +975,7 @@ public class ACustomerServiceHookDemo {
 }
 ```
 
-期望：按 **99.0** 执行退款（以 `editedArguments` 为准）。
+期望：按 **99.0** 执行退款（以 `editedArguments` 为准）。这一步验证的是"人类拥有最终修正权"。
 
 > `editedArguments` 是**整段工具参数 JSON 字符串**，字段名需与工具入参一致（本例 `orderId`、`amount`）。
 
@@ -1144,17 +1002,21 @@ public class ACustomerServiceHookDemo {
 }
 ```
 
-期望：**不会**真正退款；Agent 根据 `reason` 向用户说明。 
+期望：**不会**真正退款；Agent 根据 `reason` 向用户说明。注意"拒绝"不是抛异常——它是一次**可观察的结果**，模型会拿着拒绝理由继续和用户对话，这正是 1 号缺口里讲的那个设计观念。
+
+---
 
 ## 下一篇预告
 
-多智能体编排：`Sequential` / `Parallel` / `Routing` / `Loop`，以及 Supervisor、Handoffs。  
+多智能体编排：`Sequential` / `Parallel` / `Routing` / `Loop`，以及 Supervisor、Handoffs。
+
+单个 Agent 治理好了之后，下一步是**让一群 Agent 协作**。
 
 ---
 
 ## 官方参考
 
-- Hooks / Interceptors：https://java2ai.com/docs/frameworks/agent-framework/tutorials/hooks  
-- 记忆与 Checkpoint：https://java2ai.com/docs/frameworks/agent-framework/tutorials/memory  
-- HITL 示例：`examples/.../HumanInTheLoopExample.java`  
+- Hooks / Interceptors：https://java2ai.com/docs/frameworks/agent-framework/tutorials/hooks
+- 记忆与 Checkpoint：https://java2ai.com/docs/frameworks/agent-framework/tutorials/memory
+- HITL 示例：`examples/.../HumanInTheLoopExample.java`
 - Skills 示例：`spring-ai-alibaba-agent-example/skills-agent-example`
