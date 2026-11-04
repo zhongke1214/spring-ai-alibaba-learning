@@ -1542,7 +1542,7 @@ public class CAgentStreamDemo {
 
 ## 下一篇
 
-[《别让 Agent 重启就失忆：记忆、Checkpoint 与状态实战》](./03-别让Agent重启就失忆-记忆Checkpoint与状态.md)
+[《Spring AI Alibaba Agent 记忆持久化实战：从 MemorySaver 到 Redis，重启不失忆》](./03-Spring AI Alibaba Agent 记忆持久化实战：从 MemorySaver 到 Redis，重启不失忆.md)
 
 这一篇的 `MemorySaver` 一重启就清空，`threadId` 也只在本进程内有效。下一篇讲：`MemorySaver` → Redis/DB 持久化、`OverAllState` 与 KeyStrategy、多租户 `threadId` 设计、上下文修剪与摘要。
 

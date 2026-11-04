@@ -1,4 +1,4 @@
-# 别让 Agent 重启就失忆：Checkpoint、压缩上下文、业务字段分离设计实战
+# Spring AI Alibaba Agent 记忆持久化实战：从 MemorySaver 到 Redis，重启不失忆
 
 > 版本基准：**Spring AI Alibaba 1.1.2.x + Spring AI 1.1.2 + JDK 17+**（本文所有 API 以此版本为准）
 >
