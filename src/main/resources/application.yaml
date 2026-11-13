@@ -11,8 +11,21 @@ spring:
       api-key: ${AI_DASHSCOPE_API_KEY}
       chat:
         options:
-          model: qwen3.7-flash
+          model: qwen3.8-27b
           multi-model: true
+    mcp:
+      client:
+        enabled: true
+        type: SYNC
+        request-timeout: 30s
+        toolcallback:
+          enabled: true           # 默认就是 true；置 false 后不再产生 ToolCallbackProvider
+        streamable-http:
+          connections:
+            local-tools:
+              url: http://localhost:8081
+              endpoint: /mcp      # 默认就是 /mcp，写出来是为了和旧 SSE 的 /sse 对照
+
 
   data:
     redis:

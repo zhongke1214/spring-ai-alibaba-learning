@@ -1,0 +1,16 @@
+#Streamable HTTP
+spring:
+  application:
+    name: spring-ai-alibaba-mcpServer
+  ai:
+    mcp:
+      server:
+        name: local-tools
+        version: 1.0.0
+        protocol: STREAMABLE
+        type: SYNC                  # 只注册同步方法，返回 Mono/Flux 的会被过滤掉
+        annotation-scanner:
+          enabled: true             # 扫描 @McpTool / @McpResource / @McpPrompt
+
+server:
+  port: 8081
