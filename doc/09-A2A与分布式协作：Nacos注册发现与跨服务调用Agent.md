@@ -459,6 +459,8 @@ spring:
             enabled: false     # A 不对外提供 Agent，不注册
           discovery:
             enabled: true      # 只当消费者
+          username: nacos
+          password: nacos
 ```
 
 第一件事：**别在启动期 build，也别每个请求 build。** 两个原因，都来自源码：
