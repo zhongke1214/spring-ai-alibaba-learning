@@ -1,0 +1,17 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: a2a-consumer
+  ai:
+    alibaba:
+      a2a:
+        nacos:
+          server-addr: ${NACOS_SERVER_ADDR:192.168.110.100:8848}
+          registry:
+            enabled: false     # A 不对外提供 Agent，不注册
+          discovery:
+            enabled: true      # 只当消费者
+          username: nacos
+          password: nacos

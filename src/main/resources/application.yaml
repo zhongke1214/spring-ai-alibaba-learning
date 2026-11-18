@@ -11,7 +11,7 @@ spring:
       api-key: ${AI_DASHSCOPE_API_KEY}
       chat:
         options:
-          model: qwen3.8-27b
+          model: qwen3.8-flash
           multi-model: true
     mcp:
       client:
@@ -25,7 +25,25 @@ spring:
             local-tools:
               url: http://localhost:8081
               endpoint: /mcp      # 默认就是 /mcp，写出来是为了和旧 SSE 的 /sse 对照
-
+    alibaba:
+      a2a:
+        server:
+          version: 1.0.0
+          card:
+            name: data_analysis_agent    # 必须与 ReactAgent.name() 逐字符一致
+            description: 专门用于数据分析和统计计算的智能体
+            provider:
+              name: saa-learning
+              organization: stage09
+              url: http://ai.kmind.space
+        nacos:
+          server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
+          registry:
+            enabled: true   # 默认就是 true；显式写出是为了让「我是提供者」一眼可见
+          discovery:
+            enabled: false   # B 不消费别人，关掉
+          username: nacos
+          password: nacos
 
   data:
     redis:

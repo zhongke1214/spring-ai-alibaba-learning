@@ -82,10 +82,17 @@
             <version>3.45.1</version>
         </dependency>
 
+<!--        这里防止mcpServer未启动导致项目启动报错注释，测试stage08 mcp模块时打开对应注释和代码-->
+<!--        <dependency>-->
+<!--            <groupId>org.springframework.ai</groupId>-->
+<!--            <artifactId>spring-ai-starter-mcp-client</artifactId>-->
+<!--        </dependency>-->
+
         <dependency>
-            <groupId>org.springframework.ai</groupId>
-            <artifactId>spring-ai-starter-mcp-client</artifactId>
+            <groupId>com.alibaba.cloud.ai</groupId>
+            <artifactId>spring-ai-alibaba-starter-a2a-nacos</artifactId>
         </dependency>
+
     </dependencies>
 
     <build>
