@@ -84,6 +84,10 @@ mvn clean package -DskipTests
 - 官方示例仓库：<https://github.com/spring-ai-alibaba/examples>
 - 我的 CSDN：<https://blog.csdn.net/qq_37878585>
 
+## 友情链接
+
+- [WenQu（问渠）](https://github.com/yuanke1995/WenQu)：基于 Spring AI 构建、支持私有化部署的 AI 智能体工作台，覆盖智能对话、知识检索、工具执行与能力开放的完整链路
+
 ## License
 
 本项目基于 [MIT License](./LICENSE) 开源。
