@@ -34,6 +34,7 @@
 | 07 | [RAG 进阶：权限过滤、引用溯源与企业 FAQ Agent](./doc/07-RAG进阶：权限过滤、引用溯源与企业FAQ-Agent.md) | 切分策略、权限过滤、混合检索、引用溯源，落地企业 FAQ Agent |
 | 08 | [MCP：协议基础、Client/Server 与 ReactAgent 接入](./doc/08-MCP：协议基础ClientServer与ReactAgent接入.md) | MCP 协议原理、Client/Server 落地，两个进程跑通 MCP 并接入 ReactAgent |
 | 09 | [A2A 与分布式协作：Nacos 注册发现与跨服务调用 Agent](./doc/09-A2A与分布式协作：Nacos注册发现与跨服务调用Agent.md) | A2A 通信模型、Nacos 注册与发现，两个 Spring Boot 服务跨调用 Agent |
+| 10 | [多模态与语音 Agent：概念、知识地图与落地场景](./doc/10-多模态与语音%20Agent：概念、知识地图与落地场景.md) | 多模态概念与知识地图、真实落地场景与官方学习资料索引 |
 
 ## 快速开始
 
@@ -72,7 +73,7 @@ mvn clean package -DskipTests
 - [x] 07 RAG 进阶：权限过滤、引用溯源与企业 FAQ Agent
 - [x] 08 MCP：协议基础 Client/Server 与 ReactAgent 接入
 - [x] 09 A2A 与分布式协作：Nacos 注册发现与跨服务调用
-- [ ] 10 多模态与语音 Agent：图文理解与 STT-Agent-TTS 三明治
+- [x] 10 多模态与语音 Agent：概念、知识地图与落地场景
 - [ ] 11 可观测、评估与平台化：日志、Tracing、指标与 Admin/Studio
 - [ ] 12 生产落地清单：安全、稳定性、成本与架构选型速查
 - [ ] 13 综合实战：企业知识库助手 / 工单客服 Agent / 多智能体调研助手
